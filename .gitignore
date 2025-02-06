@@ -1,0 +1,7 @@
+coverage
+node_modules
+dist
+test-local.js
+test-local-proxy.js
+test-local-noproxy.js
+.env

@@ -1,0 +1,10 @@
+tests/
+*.test.ts
+.env
+dist
+node_modules
+test-local-proxy.js
+test-local-noproxy.js
+test-local.js
+jest.config.js
+coverage
