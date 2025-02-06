@@ -15,24 +15,74 @@
 ## Usage
 
 ```js
-import h2Alagut from "h2alagut";
+import { fetch } from "h2alagut";
 
-const response = await h2Alagut("https://example.com");
-console.log(response.status);
+const response = await fetch("https://example.com");
+console.log(response.statusCode);
 ```
 
 ## Proxy Configuration
 
 ```js
-const response = await h2Alagut("https://example.com", {
-  proxy: "http://your-proxy-server:8080",
+const response = await fetch("https://example.com", {
+  proxy: {
+    host: "your-proxy-server",
+    port: 8080,
+    auth: "username:password", // Optional
+  },
 });
 ```
 
 ## Response Object
 
-The `Response` object returned by `h2Alagut` supports the following properties and methods:
+The `Response` object returned by `h2Alagút` supports the following properties and methods:
 
-- `status`: The HTTP status code.
+- `statusCode`: The HTTP status code.
 - `text()`: Returns the response body as a string.
 - `json()`: Parses the response body as JSON.
+- `arrayBuffer()`: Returns the response body as an `ArrayBuffer`.
+
+## Timeout Handling
+
+You can specify a timeout for the request:
+
+```js
+const response = await fetch("https://example.com", {
+  timeout: 5000, // Timeout in milliseconds
+});
+```
+
+## Error Handling
+
+The adapter throws errors for:
+
+- Invalid URLs
+- Proxy authentication failures
+- Request timeouts
+- HTTP/2 negotiation failures
+
+## Example
+
+```js
+import { fetch } from "h2alagut";
+
+try {
+  const response = await fetch("https://example.com", {
+    proxy: {
+      host: "proxy.example.com",
+      port: 8080,
+      auth: "user:pass",
+    },
+    timeout: 3000,
+  });
+
+  console.log(response.statusCode);
+  console.log(await response.text());
+} catch (error) {
+  console.error("Request failed:", error.message);
+}
+```
+
+## License
+
+MIT
