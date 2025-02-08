@@ -8,6 +8,7 @@ interface FetchResponse extends IncomingMessage {
   json: () => Promise<any>;
   text: () => Promise<string>;
   arrayBuffer: () => Promise<ArrayBuffer>;
+  remoteAddress?: string;
 }
 
 /**
@@ -63,6 +64,11 @@ export async function fetchAdapter(
       const response = new IncomingMessage(new Socket()) as FetchResponse;
       response.statusCode = h2res.status;
 
+      // Add remoteAddress property if available
+      if (h2res.headers[':remote-addr']) {
+        response.remoteAddress = h2res.headers[':remote-addr'] as string;
+      }
+
       // Set headers
       Object.entries(h2res.headers)
         .filter(([key]) => !key.startsWith(":"))
@@ -115,6 +121,11 @@ export async function fetchAdapter(
       // Create a response object
       const response = new IncomingMessage(new Socket()) as FetchResponse;
       response.statusCode = h2res.status;
+
+      // Add remoteAddress property if available
+      if (h2res.headers[':remote-addr']) {
+        response.remoteAddress = h2res.headers[':remote-addr'] as string;
+      }
 
       // Set headers
       Object.entries(h2res.headers)

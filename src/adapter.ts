@@ -296,18 +296,20 @@ function getSocket(
 
       const connectOptions: http.RequestOptions = {
         host: proxyHost,
-        port: Number(proxyPort),
+        port: proxyPort,
         method: "CONNECT",
-        path: `${targetUrl.hostname}:${Number(targetUrl.port || 443)}`,
+        path: `${targetUrl.hostname}:${targetUrl.port || 443}`,
         headers: {},
       };
 
       if (auth) {
-        const [username, password] = auth.split(":");
+        const authTrimmed = auth.trim();
+        const [username, password] = authTrimmed.split(":").map((part) => part.trim());
         if (!username || !password) {
-          return reject(new Error("Invalid proxy authentication format"));
+          return reject(new Error('Invalid proxy authentication format. Expected "username:password"'));
         }
         connectOptions.headers = {
+          ...connectOptions.headers,
           "Proxy-Authorization": `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
         };
       }
