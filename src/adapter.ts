@@ -6,6 +6,7 @@ import { gunzipSync, inflateSync, brotliDecompressSync } from "zlib";
 import { ProxyConfig } from "./types";
 import net from "net";
 import type { ClientHttp2Session } from "http2";
+import { H2Response } from "./types";
 
 /**
  * Creates an HTTP/2 client session for the given target URL.
@@ -13,14 +14,16 @@ import type { ClientHttp2Session } from "http2";
  *
  * @param targetUrl The URL to connect to.
  * @param proxyConfig Optional proxy configuration.
+ * @param debug Optional debug flag.
  * @returns A promise that resolves with an HTTP/2 client session.
  */
 export function createHttp2Session(
   targetUrl: URL,
   proxyConfig?: ProxyConfig,
+  debug?: boolean,
 ): Promise<http2.ClientHttp2Session | http.ClientRequest> {
   return new Promise((resolve, reject) => {
-    getSocket(targetUrl, proxyConfig)
+    getSocket(targetUrl, proxyConfig, debug)
       .then((socket) => {
         const tlsSocket = tls.connect({
           socket,
@@ -36,13 +39,12 @@ export function createHttp2Session(
             session.on("error", reject);
             resolve(session);
           } else {
-            // Fallback to HTTPS for HTTP/1.1
+            // Fallback to traditional HTTPS (HTTP/1.1) regardless of proxy.
             const req = https.request({
               host: targetUrl.hostname,
               port: Number(targetUrl.port || 443),
               createConnection: () => tlsSocket,
             });
-            // Add a polyfill so that session.close() works in tests.
             (req as any).close = () => req.abort();
             resolve(req);
           }
@@ -71,6 +73,7 @@ function isHttp2Session(
  * @param body Optional request body.
  * @param proxy Optional proxy configuration.
  * @param signal Optional AbortSignal.
+ * @param debug Optional debug flag.
  * @returns A promise resolving with an object containing status, headers, and methods to retrieve the response body.
  */
 export async function h2Request(
@@ -80,17 +83,16 @@ export async function h2Request(
   body: Buffer | string | undefined,
   proxy?: ProxyConfig,
   signal?: AbortSignal,
-): Promise<{
-  status: number;
-  headers: Record<string, string | string[] | undefined>;
-  text: () => Promise<string>;
-  json: <T = any>() => Promise<T>;
-}> {
+  debug?: boolean,
+): Promise<H2Response> {
   const targetUrl = new URL(url);
+  const log = (...args: any[]) => {
+    if (debug) console.log(...args);
+  };
   let client: http2.ClientHttp2Session | http.ClientRequest | null = null;
 
   try {
-    client = await createHttp2Session(targetUrl, proxy);
+    client = await createHttp2Session(targetUrl, proxy, debug);
 
     return new Promise((resolve, reject) => {
       if (!client) {
@@ -100,6 +102,15 @@ export async function h2Request(
       const safeClient = client!;
 
       if (isHttp2Session(safeClient)) {
+        const pseudoHeaders = {
+          ":method": method,
+          ":path": targetUrl.pathname + targetUrl.search,
+          ":scheme": targetUrl.protocol.slice(0, -1),
+          ":authority": targetUrl.host,
+          ...headers,
+        };
+        log("HTTP/2 request headers (pseudo-headers):", pseudoHeaders);
+
         const req = safeClient.request({
           ":method": method,
           ":path": targetUrl.pathname + targetUrl.search,
@@ -152,8 +163,27 @@ export async function h2Request(
             client.close();
           }
 
+          let rawStatus =
+            responseHeaders[":status"] || responseHeaders["status"];
+          if (rawStatus === undefined) {
+            const descriptors =
+              Object.getOwnPropertyDescriptors(responseHeaders);
+            if (
+              descriptors[":status"] &&
+              descriptors[":status"].value !== undefined
+            ) {
+              rawStatus = descriptors[":status"].value;
+            } else if (
+              descriptors["status"] &&
+              descriptors["status"].value !== undefined
+            ) {
+              rawStatus = descriptors["status"].value;
+            }
+          }
+          const statusVal =
+            rawStatus !== undefined ? Number(rawStatus) : undefined;
           resolve({
-            status: Number(responseHeaders[":status"]) || 0,
+            status: statusVal,
             headers: responseHeaders,
             text: async () => bodyText,
             json: async () => {
@@ -165,6 +195,11 @@ export async function h2Request(
                 );
               }
             },
+            socket:
+              client?.socket && client.socket.localAddress
+                ? { localAddress: client.socket.localAddress }
+                : undefined,
+            remoteAddress: (client?.socket as any)?._remoteAddress,
           });
         });
 
@@ -190,14 +225,17 @@ export async function h2Request(
           });
         }
       } else {
+        log("HTTP/1.1 request headers:", headers);
         // Handle HTTP/1.1 request
         const req = safeClient;
         req.end();
 
         let responseHeaders: http.IncomingHttpHeaders = {};
+        let statusCode: number | undefined;
         const chunks: Buffer[] = [];
 
         req.on("response", (res) => {
+          statusCode = res.statusCode;
           responseHeaders = res.headers;
         });
 
@@ -233,8 +271,15 @@ export async function h2Request(
             client.close();
           }
 
+          // For HTTP/1.1 responses, statusCode is available on the response (captured in the "response" event).
+          const statusVal =
+            statusCode !== undefined
+              ? statusCode
+              : responseHeaders[":status"] !== undefined
+                ? Number(responseHeaders[":status"])
+                : undefined;
           resolve({
-            status: Number(responseHeaders[":status"]) || 0,
+            status: statusVal,
             headers: responseHeaders,
             text: async () => bodyText,
             json: async () => {
@@ -282,18 +327,22 @@ export async function h2Request(
   }
 }
 
-// New helper: Incrementally obtain a socket, either via proxy or directly.
 function getSocket(
   targetUrl: URL,
   proxyConfig?: ProxyConfig,
+  debug?: boolean,
 ): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
+    const log = (...args: any[]) => {
+      if (debug) console.log(...args);
+    };
     if (proxyConfig) {
       const { host: proxyHost, port: proxyPort, auth } = proxyConfig;
       if (!proxyHost || !proxyPort || proxyHost === "" || proxyPort === 0) {
         return reject(new Error("Proxy configuration is incomplete"));
       }
 
+      // Use the same CONNECT options as the old working version:
       const connectOptions: http.RequestOptions = {
         host: proxyHost,
         port: proxyPort,
@@ -303,21 +352,34 @@ function getSocket(
       };
 
       if (auth) {
-        const authTrimmed = auth.trim();
-        const [username, password] = authTrimmed.split(":").map((part) => part.trim());
+        const [username, password] = auth.split(":");
         if (!username || !password) {
-          return reject(new Error('Invalid proxy authentication format. Expected "username:password"'));
+          return reject(
+            new Error(
+              'Invalid proxy authentication format. Expected "username:password"',
+            ),
+          );
         }
+        // Explicitly set extra headers as in your old working version.
         connectOptions.headers = {
           ...connectOptions.headers,
-          "Proxy-Authorization": `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+          "Proxy-Authorization": `Basic ${Buffer.from(
+            `${username}:${password}`,
+          ).toString("base64")}`,
+          "Proxy-Connection": "Keep-Alive",
+          Host: `${targetUrl.hostname}:${targetUrl.port || 443}`,
         };
       }
 
+      log("CONNECT request options:", connectOptions);
       const req = http.request(connectOptions);
+      req.setTimeout(30000, () => {
+        req.destroy(new Error("CONNECT request timed out"));
+      });
       req.end();
 
       req.on("connect", (res, socket) => {
+        log("CONNECT response received:", res.statusCode, res.headers);
         if (res.statusCode !== 200) {
           socket.destroy();
           if (res.statusCode === 407) {
@@ -329,10 +391,13 @@ function getSocket(
             ),
           );
         }
+        // Store the proxy's IP address
+        (socket as any)._remoteAddress = req.socket?.remoteAddress || undefined;
         resolve(socket);
       });
 
       req.on("error", (err) => {
+        console.error("Error event on CONNECT request:", err);
         reject(new Error(`Proxy connection failed: ${err.message}`));
       });
     } else {
@@ -340,6 +405,7 @@ function getSocket(
         host: targetUrl.hostname,
         port: Number(targetUrl.port || 443),
       });
+      (socket as any)._remoteAddress = socket.remoteAddress;
       socket.on("error", reject);
       socket.on("connect", () => resolve(socket));
     }

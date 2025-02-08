@@ -1,6 +1,6 @@
 {
   "name": "@joneslloyd/h2alagut",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "H2alagút – A fetch adapter for Node.js that performs HTTP/2 requests with optional HTTP/1 proxy tunneling via HTTP CONNECT.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
