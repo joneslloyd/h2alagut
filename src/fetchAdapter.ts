@@ -6,7 +6,7 @@ import {
 } from "./helpers/responseHelpers";
 
 /**
- * A fetch‑compatible adapter that uses HTTP/2 with optional HTTP CONNECT tunneling.
+ * A fetch‑compatible adapter that uses HTTP/2 with optional HTTP CONNECT tunnelling.
  * It accepts all standard fetch options plus a `proxy` property.
  *
  * @param input The URL (or Request) to fetch.
@@ -51,16 +51,6 @@ export async function fetchAdapter(
     }, init.timeout);
 
     try {
-      const h2res = await h2Request(
-        url,
-        method,
-        headers as Record<string, string>,
-        body,
-        proxy,
-        controller.signal,
-        init?.debug,
-      );
-
       return await handleRequest(
         url,
         method,
@@ -74,23 +64,15 @@ export async function fetchAdapter(
     }
   } else {
     try {
-      const h2res = await h2Request(
-        url,
-        method,
-        headers as Record<string, string>,
-        body,
-        proxy,
-        undefined,
-        init?.debug,
-      );
-
       return await handleRequest(url, method, headers, body, proxy);
     } catch (error) {
       if (error instanceof Error && error.message.includes("timed out")) {
         throw error;
       }
       throw new Error(
-        `HTTP/2 request failed: ${error instanceof Error ? error.message : String(error)}`,
+        `HTTP/2 request failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
     }
   }
@@ -104,7 +86,8 @@ async function handleRequest(
   proxy?: ProxyConfig,
   signal?: AbortSignal,
 ): Promise<FetchResponse> {
-  let h2res;
+  // Declare h2res in an outer scope so that it is available in closures.
+  let h2res: any;
   try {
     h2res = await h2Request(
       url,
@@ -118,10 +101,13 @@ async function handleRequest(
   } catch (error) {
     throw error;
   }
+  if (!h2res) {
+    throw new Error("HTTP/2 response is undefined");
+  }
   const response = assembleInitialResponse(h2res);
   response.text = createResponseTextMethod(h2res, response);
 
-  // Set body
+  // Set up text() as a fallback.
   let bodyText = "";
   response.text = async () => {
     if (!bodyText) {
@@ -138,8 +124,11 @@ async function handleRequest(
   };
 
   response.arrayBuffer = async () => {
-    const text = await response.text();
-    return new TextEncoder().encode(text).buffer;
+    const chunks: Buffer[] = [];
+    for await (const chunk of h2res) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks).buffer;
   };
 
   return response;
