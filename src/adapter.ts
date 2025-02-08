@@ -7,6 +7,8 @@ import { ProxyConfig } from "./types";
 import net from "net";
 import type { ClientHttp2Session } from "http2";
 import { H2Response } from "./types";
+import { URL } from "url";
+import { assembleInitialResponse } from "./helpers/responseHelpers";
 
 /**
  * Creates an HTTP/2 client session for the given target URL.
