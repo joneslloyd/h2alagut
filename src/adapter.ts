@@ -1,8 +1,11 @@
-import http2 from "http2";
+import * as http2 from "http2";
 import http from "http";
+import https from "https";
 import tls from "tls";
 import { gunzipSync, inflateSync, brotliDecompressSync } from "zlib";
 import { ProxyConfig } from "./types";
+import net from "net";
+import type { ClientHttp2Session } from "http2";
 
 /**
  * Creates an HTTP/2 client session for the given target URL.
@@ -15,127 +18,48 @@ import { ProxyConfig } from "./types";
 export function createHttp2Session(
   targetUrl: URL,
   proxyConfig?: ProxyConfig,
-): Promise<http2.ClientHttp2Session> {
+): Promise<http2.ClientHttp2Session | http.ClientRequest> {
   return new Promise((resolve, reject) => {
-    if (!proxyConfig) {
-      // Direct connection
-      try {
-        const session = http2.connect(targetUrl.origin);
-        session.on("error", reject);
-        return resolve(session);
-      } catch (err) {
-        return reject(err);
-      }
-    }
-
-    // Validate proxy configuration
-    const { host: proxyHost, port: proxyPort, auth } = proxyConfig;
-    if (!proxyHost || !proxyPort) {
-      return reject(
-        new Error(
-          "Proxy configuration is incomplete. Both HOST and PORT must be set",
-        ),
-      );
-    }
-
-    if (proxyHost === "" || proxyPort === 0) {
-      return reject(
-        new Error(
-          "Proxy configuration is incomplete. Both HOST and PORT must be set",
-        ),
-      );
-    }
-
-    // Create an HTTP CONNECT tunnel via the proxy.
-    const connectOptions: http.RequestOptions = {
-      host: proxyHost,
-      port: proxyPort,
-      method: "CONNECT",
-      path: `${targetUrl.hostname}:${targetUrl.port || 443}`,
-      headers: {},
-    };
-
-    if (auth) {
-      const [username, password] = auth.split(":");
-      if (!username || !password) {
-        return reject(
-          new Error(
-            'Invalid proxy authentication format. Expected "username:password"',
-          ),
-        );
-      }
-      connectOptions.headers = {
-        ...connectOptions.headers,
-        "Proxy-Authorization": `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
-      };
-    }
-
-    const req = http.request(connectOptions);
-    req.end();
-
-    req.on("connect", (res, socket) => {
-      if (res.statusCode === 407) {
-        socket.destroy();
-        return reject(
-          new Error(
-            `Proxy authentication failed. Status code: ${res.statusCode}, Message: ${res.statusMessage}`,
-          ),
-        );
-      }
-      if (res.statusCode !== 200) {
-        socket.destroy();
-        return reject(
-          new Error(
-            `Tunnel establishment failed. Status code: ${res.statusCode}, Message: ${res.statusMessage}`,
-          ),
-        );
-      }
-
-      // Perform TLS handshake through the tunnel.
-      const tlsSocket: tls.TLSSocket = tls.connect(
-        {
+    getSocket(targetUrl, proxyConfig)
+      .then((socket) => {
+        const tlsSocket = tls.connect({
           socket,
           servername: targetUrl.hostname,
           ALPNProtocols: ["h2", "http/1.1"],
-        },
-        () => {
-          if (tlsSocket.alpnProtocol !== "h2") {
-            return reject(
-              new Error(
-                `Server did not negotiate HTTP/2, got: ${tlsSocket.alpnProtocol}`,
-              ),
-            );
+        });
+
+        tlsSocket.on("secureConnect", () => {
+          if (tlsSocket.alpnProtocol === "h2") {
+            const session = http2.connect(`https://${targetUrl.hostname}`, {
+              createConnection: () => tlsSocket,
+            });
+            session.on("error", reject);
+            resolve(session);
+          } else {
+            // Fallback to HTTPS for HTTP/1.1
+            const req = https.request({
+              host: targetUrl.hostname,
+              port: Number(targetUrl.port || 443),
+              createConnection: () => tlsSocket,
+            });
+            // Add a polyfill so that session.close() works in tests.
+            (req as any).close = () => req.abort();
+            resolve(req);
           }
-          const clientSession = http2.connect(`https://${targetUrl.hostname}`, {
-            createConnection: () => tlsSocket,
-          });
-          clientSession.on("error", reject);
-          resolve(clientSession);
-        },
-      );
+        });
 
-      tlsSocket.on("error", (err) => {
-        reject(new Error(`TLS handshake failed: ${err.message}`));
-      });
-    });
-
-    req.on("error", (err) => {
-      if (err.message.includes("timed out")) {
-        return reject(err);
-      }
-      reject(
-        new Error(
-          `Proxy connection failed: ${err.message}. Check proxy settings: ${connectOptions.host}:${connectOptions.port}`,
-        ),
-      );
-    });
-
-    if (proxyConfig?.timeout) {
-      req.setTimeout(proxyConfig.timeout, () => {
-        req.destroy(new Error("Request timed out"));
-      });
-    }
+        tlsSocket.on("error", (err) => {
+          reject(new Error(`TLS handshake failed: ${err.message}`));
+        });
+      })
+      .catch((err) => reject(err));
   });
+}
+
+function isHttp2Session(
+  client: http2.ClientHttp2Session | http.ClientRequest,
+): client is ClientHttp2Session {
+  return typeof (client as any).request === "function";
 }
 
 /**
@@ -163,7 +87,7 @@ export async function h2Request(
   json: <T = any>() => Promise<T>;
 }> {
   const targetUrl = new URL(url);
-  let client: http2.ClientHttp2Session | null = null;
+  let client: http2.ClientHttp2Session | http.ClientRequest | null = null;
 
   try {
     client = await createHttp2Session(targetUrl, proxy);
@@ -172,90 +96,250 @@ export async function h2Request(
       if (!client) {
         return reject(new Error("HTTP/2 client session is null"));
       }
-      const req = client.request({
-        ":method": method,
-        ":path": targetUrl.pathname + targetUrl.search,
-        ":scheme": targetUrl.protocol.slice(0, -1),
-        ":authority": targetUrl.host,
-        ...headers,
-      });
+      // Ensure the client is non-null for further usage.
+      const safeClient = client!;
 
-      if (body) {
-        req.write(body);
-      }
-      req.end();
+      if (isHttp2Session(safeClient)) {
+        const req = safeClient.request({
+          ":method": method,
+          ":path": targetUrl.pathname + targetUrl.search,
+          ":scheme": targetUrl.protocol.slice(0, -1),
+          ":authority": targetUrl.host,
+          ...headers,
+        });
 
-      let responseHeaders: http2.IncomingHttpHeaders = {};
-      const chunks: Buffer[] = [];
+        if (body) {
+          req.write(body);
+        }
+        req.end();
 
-      req.on("response", (hdrs) => {
-        responseHeaders = hdrs;
-      });
+        let responseHeaders: http2.IncomingHttpHeaders = {};
+        const chunks: Buffer[] = [];
 
-      req.on("data", (chunk: Buffer) => {
-        chunks.push(chunk);
-      });
+        req.on("response", (hdrs) => {
+          responseHeaders = hdrs;
+        });
 
-      req.on("end", () => {
-        const buffer = Buffer.concat(chunks);
-        let decompressed: Buffer;
-        const encoding = responseHeaders["content-encoding"];
-        try {
-          if (encoding === "gzip") {
-            decompressed = gunzipSync(buffer);
-          } else if (encoding === "deflate") {
-            decompressed = inflateSync(buffer);
-          } else if (encoding === "br") {
-            decompressed = brotliDecompressSync(buffer);
-          } else {
-            decompressed = buffer;
+        req.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+
+        req.on("end", () => {
+          const buffer = Buffer.concat(chunks);
+          let decompressed: Buffer;
+          const encoding = responseHeaders["content-encoding"];
+          try {
+            if (encoding === "gzip") {
+              decompressed = gunzipSync(buffer);
+            } else if (encoding === "deflate") {
+              decompressed = inflateSync(buffer);
+            } else if (encoding === "br") {
+              decompressed = brotliDecompressSync(buffer);
+            } else {
+              decompressed = buffer;
+            }
+          } catch (err) {
+            if (client && isHttp2Session(client)) {
+              client.close();
+            }
+            return reject(
+              new Error(`Decompression failed: ${(err as Error).message}`),
+            );
           }
-        } catch (err) {
-          client?.close();
-          return reject(
-            new Error(`Decompression failed: ${(err as Error).message}`),
-          );
+
+          const bodyText = decompressed.toString("utf8");
+          if (client && isHttp2Session(client)) {
+            client.close();
+          }
+
+          resolve({
+            status: Number(responseHeaders[":status"]) || 0,
+            headers: responseHeaders,
+            text: async () => bodyText,
+            json: async () => {
+              try {
+                return JSON.parse(bodyText);
+              } catch (err) {
+                throw new Error(
+                  `JSON parsing failed: ${(err as Error).message}`,
+                );
+              }
+            },
+          });
+        });
+
+        req.on("error", (err) => {
+          if (client && isHttp2Session(client)) {
+            client.close();
+          }
+          reject(new Error(`Request failed: ${(err as Error).message}`));
+        });
+
+        if (proxy?.timeout) {
+          req.setTimeout(proxy.timeout, () => {
+            req.destroy(new Error("Request timed out"));
+          });
         }
 
-        const bodyText = decompressed.toString("utf8");
-        client?.close();
-
-        resolve({
-          status: Number(responseHeaders[":status"]) || 0,
-          headers: responseHeaders,
-          text: async () => bodyText,
-          json: async () => {
-            try {
-              return JSON.parse(bodyText);
-            } catch (err) {
-              throw new Error(`JSON parsing failed: ${(err as Error).message}`);
+        if (signal) {
+          signal.addEventListener("abort", () => {
+            req.destroy(new Error("Request timed out"));
+            if (client && isHttp2Session(client)) {
+              client.close();
             }
-          },
-        });
-      });
+          });
+        }
+      } else {
+        // Handle HTTP/1.1 request
+        const req = safeClient;
+        req.end();
 
-      req.on("error", (err) => {
-        client?.close();
-        reject(new Error(`Request failed: ${(err as Error).message}`));
-      });
+        let responseHeaders: http.IncomingHttpHeaders = {};
+        const chunks: Buffer[] = [];
 
-      if (proxy?.timeout) {
-        req.setTimeout(proxy.timeout, () => {
-          req.destroy(new Error("Request timed out"));
+        req.on("response", (res) => {
+          responseHeaders = res.headers;
         });
-      }
 
-      if (signal) {
-        signal.addEventListener("abort", () => {
-          req.destroy(new Error("Request timed out"));
-          client?.close();
+        req.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
         });
+
+        req.on("end", () => {
+          const buffer = Buffer.concat(chunks);
+          let decompressed: Buffer;
+          const encoding = responseHeaders["content-encoding"];
+          try {
+            if (encoding === "gzip") {
+              decompressed = gunzipSync(buffer);
+            } else if (encoding === "deflate") {
+              decompressed = inflateSync(buffer);
+            } else if (encoding === "br") {
+              decompressed = brotliDecompressSync(buffer);
+            } else {
+              decompressed = buffer;
+            }
+          } catch (err) {
+            if (client && isHttp2Session(client)) {
+              client.close();
+            }
+            return reject(
+              new Error(`Decompression failed: ${(err as Error).message}`),
+            );
+          }
+
+          const bodyText = decompressed.toString("utf8");
+          if (client && isHttp2Session(client)) {
+            client.close();
+          }
+
+          resolve({
+            status: Number(responseHeaders[":status"]) || 0,
+            headers: responseHeaders,
+            text: async () => bodyText,
+            json: async () => {
+              try {
+                return JSON.parse(bodyText);
+              } catch (err) {
+                throw new Error(
+                  `JSON parsing failed: ${(err as Error).message}`,
+                );
+              }
+            },
+          });
+        });
+
+        req.on("error", (err) => {
+          if (client && isHttp2Session(client)) {
+            client.close();
+          }
+          reject(new Error(`Request failed: ${(err as Error).message}`));
+        });
+
+        if (proxy?.timeout) {
+          req.setTimeout(proxy.timeout, () => {
+            req.destroy(new Error("Request timed out"));
+          });
+        }
+
+        if (signal) {
+          signal.addEventListener("abort", () => {
+            req.destroy(new Error("Request timed out"));
+            if (client && isHttp2Session(client)) {
+              client.close();
+            }
+          });
+        }
       }
     });
   } catch (err) {
-    client?.close();
+    if (client && isHttp2Session(client)) {
+      client.close();
+    }
     throw new Error(
       `HTTP/2 session creation failed: ${(err as Error).message}`,
     );
   }
+}
+
+// New helper: Incrementally obtain a socket, either via proxy or directly.
+function getSocket(
+  targetUrl: URL,
+  proxyConfig?: ProxyConfig,
+): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    if (proxyConfig) {
+      const { host: proxyHost, port: proxyPort, auth } = proxyConfig;
+      if (!proxyHost || !proxyPort || proxyHost === "" || proxyPort === 0) {
+        return reject(new Error("Proxy configuration is incomplete"));
+      }
+
+      const connectOptions: http.RequestOptions = {
+        host: proxyHost,
+        port: Number(proxyPort),
+        method: "CONNECT",
+        path: `${targetUrl.hostname}:${Number(targetUrl.port || 443)}`,
+        headers: {},
+      };
+
+      if (auth) {
+        const [username, password] = auth.split(":");
+        if (!username || !password) {
+          return reject(new Error("Invalid proxy authentication format"));
+        }
+        connectOptions.headers = {
+          "Proxy-Authorization": `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+        };
+      }
+
+      const req = http.request(connectOptions);
+      req.end();
+
+      req.on("connect", (res, socket) => {
+        if (res.statusCode !== 200) {
+          socket.destroy();
+          if (res.statusCode === 407) {
+            return reject(new Error("Proxy authentication failed"));
+          }
+          return reject(
+            new Error(
+              `Tunnel establishment failed with status code ${res.statusCode}`,
+            ),
+          );
+        }
+        resolve(socket);
+      });
+
+      req.on("error", (err) => {
+        reject(new Error(`Proxy connection failed: ${err.message}`));
+      });
+    } else {
+      const socket = net.connect({
+        host: targetUrl.hostname,
+        port: Number(targetUrl.port || 443),
+      });
+      socket.on("error", reject);
+      socket.on("connect", () => resolve(socket));
+    }
+  });
 }

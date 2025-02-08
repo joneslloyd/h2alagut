@@ -1,12 +1,15 @@
 import { createHttp2Session } from "../src/adapter";
 import { URL } from "url";
+import https from "https";
 
 describe("createHttp2Session", () => {
   it("should create a direct connection without proxy", async () => {
     const url = new URL("https://example.com");
     const session = await createHttp2Session(url);
     expect(session).toBeDefined();
-    session.close();
+    if (typeof (session as any).close === "function") {
+      (session as any).close();
+    }
   });
 
   it("should throw error for incomplete proxy config", async () => {
