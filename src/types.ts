@@ -28,10 +28,11 @@ export interface FetchResponse extends IncomingMessage {
 export interface H2Response {
   status: number | undefined;
   headers: Record<string, string | string[] | undefined>;
+  rawBody?: Buffer;
   text: () => Promise<string>;
   json: <T = any>() => Promise<T>;
-  ":status"?: string | number; // Add pseudo-header support
-  ":remote-addr"?: string; // Add other pseudo-headers as needed
-  socket?: { localAddress: string }; // Add socket property
-  remoteAddress?: string; // Add remoteAddress property
+  ":status"?: string | number;
+  ":remote-addr"?: string;
+  socket?: { localAddress: string };
+  remoteAddress?: string;
 }

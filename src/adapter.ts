@@ -1,3 +1,4 @@
+// src/adapter.ts
 import * as http2 from "http2";
 import http from "http";
 import https from "https";
@@ -8,7 +9,6 @@ import net from "net";
 import type { ClientHttp2Session } from "http2";
 import { H2Response } from "./types";
 import { URL } from "url";
-import { assembleInitialResponse } from "./helpers/responseHelpers";
 
 /**
  * Creates an HTTP/2 client session for the given target URL.
@@ -160,7 +160,8 @@ export async function h2Request(
             );
           }
 
-          const bodyText = decompressed.toString("utf8");
+          const rawBody = decompressed; // Preserve the raw decompressed data.
+          const bodyText = rawBody.toString("utf8");
           if (client && isHttp2Session(client)) {
             client.close();
           }
@@ -187,6 +188,7 @@ export async function h2Request(
           resolve({
             status: statusVal,
             headers: responseHeaders,
+            rawBody, // new property for binary data
             text: async () => bodyText,
             json: async () => {
               try {
@@ -267,13 +269,12 @@ export async function h2Request(
               new Error(`Decompression failed: ${(err as Error).message}`),
             );
           }
-
-          const bodyText = decompressed.toString("utf8");
+          const rawBody = decompressed;
+          const bodyText = rawBody.toString("utf8");
           if (client && isHttp2Session(client)) {
             client.close();
           }
 
-          // For HTTP/1.1 responses, statusCode is available on the response (captured in the "response" event).
           const statusVal =
             statusCode !== undefined
               ? statusCode
@@ -283,6 +284,7 @@ export async function h2Request(
           resolve({
             status: statusVal,
             headers: responseHeaders,
+            rawBody, // added rawBody here too
             text: async () => bodyText,
             json: async () => {
               try {

@@ -4,4 +4,6 @@ dist
 test-local.js
 test-local-proxy.js
 test-local-noproxy.js
+test-download-image.js
 .env
+downloaded.png

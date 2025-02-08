@@ -1,4 +1,6 @@
+// src/fetchAdapter.ts
 import { h2Request } from "./adapter";
+const log = console.log;
 import { FetchResponse, H2FetchInit, ProxyConfig } from "./types";
 import {
   assembleInitialResponse,
@@ -10,7 +12,7 @@ import {
  * It accepts all standard fetch options plus a `proxy` property.
  *
  * @param input The URL (or Request) to fetch.
- * @param init Standard fetch init options, extended with an optional `proxy` property.
+ * @param init Standard fetch init options, extended with an optional `proxy` property and an optional `debug` flag.
  * @returns A promise that resolves to a Response‑like object.
  */
 export async function fetchAdapter(
@@ -58,13 +60,22 @@ export async function fetchAdapter(
         body,
         proxy,
         controller.signal,
+        init?.debug,
       );
     } finally {
       clearTimeout(timeout);
     }
   } else {
     try {
-      return await handleRequest(url, method, headers, body, proxy);
+      return await handleRequest(
+        url,
+        method,
+        headers,
+        body,
+        proxy,
+        undefined,
+        init?.debug,
+      );
     } catch (error) {
       if (error instanceof Error && error.message.includes("timed out")) {
         throw error;
@@ -85,6 +96,7 @@ async function handleRequest(
   body: Buffer | string | undefined,
   proxy?: ProxyConfig,
   signal?: AbortSignal,
+  debug?: boolean,
 ): Promise<FetchResponse> {
   // Declare h2res in an outer scope so that it is available in closures.
   let h2res: any;
@@ -107,15 +119,59 @@ async function handleRequest(
   const response = assembleInitialResponse(h2res);
   response.text = createResponseTextMethod(h2res, response);
 
+  // Preserve original h2res.text if available.
+  const originalTextMethod =
+    typeof h2res.text === "function" ? h2res.text.bind(h2res) : null;
+
   // Set up text() as a fallback.
-  let bodyText = "";
+  let rawBuffer: Buffer | null = null;
+  const streamToBuffer = (stream: any): Promise<Buffer> => {
+    if (typeof stream.on !== "function") {
+      return Promise.resolve(
+        Buffer.isBuffer(stream) ? stream : Buffer.from(stream),
+      );
+    }
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      stream.on("data", (chunk: Buffer | string) => {
+        chunks.push(
+          typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk,
+        );
+      });
+      stream.on("end", () => resolve(Buffer.concat(chunks)));
+      stream.on("error", reject);
+    });
+  };
+
   response.text = async () => {
-    if (!bodyText) {
-      bodyText = await h2res.text();
-      response.push(bodyText);
+    if (!rawBuffer) {
+      if (h2res.rawBody) {
+        rawBuffer = h2res.rawBody;
+      } else if (typeof h2res.on === "function") {
+        rawBuffer = await streamToBuffer(h2res);
+      } else if (originalTextMethod) {
+        const txt = await originalTextMethod();
+        rawBuffer = Buffer.from(txt);
+      } else if (Buffer.isBuffer(h2res)) {
+        rawBuffer = h2res;
+      } else if (typeof h2res === "string") {
+        rawBuffer = Buffer.from(h2res);
+      } else {
+        throw new Error("Unable to read response body.");
+      }
+      if (h2res.headers && h2res.headers["content-encoding"] && debug) {
+        log(`Content-Encoding: ${h2res.headers["content-encoding"]}`);
+      }
+      if (debug) {
+        log(`rawBuffer length: ${rawBuffer?.length}`);
+      }
+      if (!rawBuffer) {
+        throw new Error("Response body is null");
+      }
+      response.push(rawBuffer.toString("utf8"));
       response.push(null);
     }
-    return bodyText;
+    return rawBuffer!.toString("utf8");
   };
 
   response.json = async () => {
@@ -124,11 +180,13 @@ async function handleRequest(
   };
 
   response.arrayBuffer = async () => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of h2res) {
-      chunks.push(chunk);
+    if (!rawBuffer) {
+      await response.text();
     }
-    return Buffer.concat(chunks).buffer;
+    return rawBuffer!.buffer.slice(
+      rawBuffer!.byteOffset,
+      rawBuffer!.byteOffset + rawBuffer!.byteLength,
+    );
   };
 
   return response;
