@@ -1,14 +1,9 @@
 import { h2Request } from "./adapter";
-import { H2FetchInit } from "./types";
-import { IncomingMessage } from "http";
-import { Socket } from "net";
-
-interface FetchResponse extends IncomingMessage {
-  status: number;
-  json: () => Promise<any>;
-  text: () => Promise<string>;
-  arrayBuffer: () => Promise<ArrayBuffer>;
-}
+import { FetchResponse, H2FetchInit, ProxyConfig } from "./types";
+import {
+  assembleInitialResponse,
+  createResponseTextMethod,
+} from "./helpers/responseHelpers";
 
 /**
  * A fetch‑compatible adapter that uses HTTP/2 with optional HTTP CONNECT tunneling.
@@ -27,7 +22,13 @@ export async function fetchAdapter(
 
   // Extract options with defaults.
   const method = (init && init.method) || "GET";
-  const headers = (init && init.headers) || {};
+  const headers =
+    init && init.headers
+      ? Array.from(new Headers(init.headers).entries()).reduce(
+          (acc, [key, value]) => ({ ...acc, [key]: value }),
+          {},
+        )
+      : {};
   let body: Buffer | string | undefined = undefined;
 
   if (init && init.body) {
@@ -57,48 +58,17 @@ export async function fetchAdapter(
         body,
         proxy,
         controller.signal,
+        init?.debug,
       );
 
-      // Create a response object
-      const response = new IncomingMessage(new Socket()) as FetchResponse;
-      response.statusCode = h2res.status;
-
-      // Set headers
-      Object.entries(h2res.headers)
-        .filter(([key]) => !key.startsWith(":"))
-        .forEach(([key, value]) => {
-          response.headers[key] = value;
-        });
-
-      // Add pseudo-headers as custom properties
-      Object.entries(h2res.headers)
-        .filter(([key]) => key.startsWith(":"))
-        .forEach(([key, value]) => {
-          (response as any)[key] = value;
-        });
-
-      // Set body
-      let bodyText = "";
-      response.text = async () => {
-        if (!bodyText) {
-          bodyText = await h2res.text();
-          response.push(bodyText);
-          response.push(null);
-        }
-        return bodyText;
-      };
-
-      response.json = async () => {
-        const text = await response.text();
-        return JSON.parse(text);
-      };
-
-      response.arrayBuffer = async () => {
-        const text = await response.text();
-        return new TextEncoder().encode(text).buffer;
-      };
-
-      return response;
+      return await handleRequest(
+        url,
+        method,
+        headers,
+        body,
+        proxy,
+        controller.signal,
+      );
     } finally {
       clearTimeout(timeout);
     }
@@ -110,48 +80,11 @@ export async function fetchAdapter(
         headers as Record<string, string>,
         body,
         proxy,
+        undefined,
+        init?.debug,
       );
 
-      // Create a response object
-      const response = new IncomingMessage(new Socket()) as FetchResponse;
-      response.statusCode = h2res.status;
-
-      // Set headers
-      Object.entries(h2res.headers)
-        .filter(([key]) => !key.startsWith(":"))
-        .forEach(([key, value]) => {
-          response.headers[key] = value;
-        });
-
-      // Add pseudo-headers as custom properties
-      Object.entries(h2res.headers)
-        .filter(([key]) => key.startsWith(":"))
-        .forEach(([key, value]) => {
-          (response as any)[key] = value;
-        });
-
-      // Set body
-      let bodyText = "";
-      response.text = async () => {
-        if (!bodyText) {
-          bodyText = await h2res.text();
-          response.push(bodyText);
-          response.push(null);
-        }
-        return bodyText;
-      };
-
-      response.json = async () => {
-        const text = await response.text();
-        return JSON.parse(text);
-      };
-
-      response.arrayBuffer = async () => {
-        const text = await response.text();
-        return new TextEncoder().encode(text).buffer;
-      };
-
-      return response;
+      return await handleRequest(url, method, headers, body, proxy);
     } catch (error) {
       if (error instanceof Error && error.message.includes("timed out")) {
         throw error;
@@ -161,4 +94,53 @@ export async function fetchAdapter(
       );
     }
   }
+}
+
+async function handleRequest(
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body: Buffer | string | undefined,
+  proxy?: ProxyConfig,
+  signal?: AbortSignal,
+): Promise<FetchResponse> {
+  let h2res;
+  try {
+    h2res = await h2Request(
+      url,
+      method,
+      headers,
+      body,
+      proxy,
+      signal,
+      undefined,
+    );
+  } catch (error) {
+    throw error;
+  }
+  const response = assembleInitialResponse(h2res);
+  response.text = createResponseTextMethod(h2res, response);
+
+  // Set body
+  let bodyText = "";
+  response.text = async () => {
+    if (!bodyText) {
+      bodyText = await h2res.text();
+      response.push(bodyText);
+      response.push(null);
+    }
+    return bodyText;
+  };
+
+  response.json = async () => {
+    const text = await response.text();
+    return JSON.parse(text);
+  };
+
+  response.arrayBuffer = async () => {
+    const text = await response.text();
+    return new TextEncoder().encode(text).buffer;
+  };
+
+  return response;
 }

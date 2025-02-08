@@ -33,7 +33,7 @@ describe("Integration Tests", () => {
           auth: process.env.AUTH,
         },
       });
-      expect(response.statusCode).toBe(200);
+      expect(response.status).toBe(200);
     } catch (error: unknown) {
       if (
         error instanceof Error &&

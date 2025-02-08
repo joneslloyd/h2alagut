@@ -76,7 +76,7 @@ try {
     timeout: 3000,
   });
 
-  console.log(response.statusCode);
+  console.log(response.status);
   console.log(await response.text());
 } catch (error) {
   console.error("Request failed:", error.message);

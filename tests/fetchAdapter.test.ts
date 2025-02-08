@@ -19,7 +19,7 @@ describe("fetchAdapter", () => {
   it("should make a basic GET request", async () => {
     const response = await fetch("https://www.linkedin.com");
     expect(response).toBeInstanceOf(IncomingMessage);
-    expect(response.statusCode).toBe(200);
+    expect(response.status).toBe(200);
   });
 
   it("should handle proxy configuration", async () => {
@@ -36,7 +36,7 @@ describe("fetchAdapter", () => {
           auth: process.env.AUTH,
         },
       });
-      expect(response.statusCode).toBe(200);
+      expect(response.status).toBe(200);
     } catch (error) {
       if (
         error instanceof Error &&
@@ -47,7 +47,7 @@ describe("fetchAdapter", () => {
       }
       throw error;
     }
-  });
+  }, 8000);
 
   it("should throw error for invalid URL", async () => {
     await expect(fetch("invalid-url")).rejects.toThrow("Invalid URL");
